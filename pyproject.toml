@@ -1,0 +1,10 @@
+[project]
+name = "obs-click-pop"
+version = "1.0.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests requiring a running OBS instance",
+]
+addopts = "-m 'not e2e'"
