@@ -86,3 +86,36 @@ def test_map_coords_cropped(x, y, canvas_w, canvas_h, monitor_w, monitor_h, size
                         capture_pos_x=pos_x, capture_pos_y=pos_y,
                         capture_scale_x=scale_x, capture_scale_y=scale_y)
     assert result == pytest.approx(expected)
+
+
+# -------------------------------------------------------------------
+# macOS Retina scaling scenarios
+# -------------------------------------------------------------------
+# On Retina, pynput reports logical points (1680x1050) but OBS works
+# in physical pixels (3360x2100).  _spawn_circle multiplies mouse
+# coords and monitor dims by _retina_scale before calling map_coords,
+# so these tests verify map_coords receives the already-scaled values.
+
+@pytest.mark.parametrize(
+    "x, y, canvas_w, canvas_h, monitor_w, monitor_h, size, expected",
+    [
+        # Retina 2x: pynput center (840,525) * 2 = (1680,1050),
+        # monitor 1680*2=3360, canvas 3360.  scale = 3360/3360 = 1.0
+        # obs_x = 1680*1.0 - 40 = 1640
+        (1680, 1050, 3360, 2100, 3360, 2100, 80, (1640.0, 1010.0)),
+        # Retina 2x with a smaller canvas (1920x1080):
+        # scale_x = 1920/3360 ≈ 0.5714, scale_y = 1080/2100 ≈ 0.5143
+        # obs_x = 1680*0.5714 - 40 ≈ 920
+        # obs_y = 1050*0.5143 - 40 = 500
+        (1680, 1050, 1920, 1080, 3360, 2100, 80, (920.0, 500.0)),
+    ],
+    ids=[
+        "retina_2x_native_canvas",
+        "retina_2x_scaled_canvas",
+    ],
+)
+def test_map_coords_retina_prescaled(x, y, canvas_w, canvas_h,
+                                     monitor_w, monitor_h, size, expected):
+    """Verify map_coords works when coords are pre-scaled to physical pixels."""
+    result = map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, size)
+    assert result == pytest.approx(expected, abs=1.0)
