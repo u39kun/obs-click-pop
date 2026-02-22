@@ -74,7 +74,7 @@ If your distro's OBS package was built against a different Python version, match
    - **Left/Right-click images** — what overlay graphic to use for left and right clicks. By default, red and blue circles are used.
    - **Circle duration** — how long each indicator stays visible (default 350 ms)
    - **Circle diameter** — size in pixels (default 60)
-   - **Monitor width/height** — your display resolution (auto-detected)
+   - **Monitor width/height** — your display resolution (auto-detected but overrideable)
    - **Max simultaneous circles** — how many indicators can show at once (default 5)
    - **Display Capture source** — select your Display Capture from the dropdown for crop-aware positioning (leave blank if no crop is applied)
 4. Click **Start Listener**
@@ -88,6 +88,14 @@ If your Display Capture source is cropped to a sub-region of your screen, select
 ## Customization
 
 Replace the PNG files with your own designs. Any transparent PNG works — the script will scale it to the configured circle diameter.
+
+
+## Tips
+
+You need to click on "Refresh Displays":
+- after you add or remove Screen Capture sources
+- after you change monitor connections on your machine
+- after you change a Screen Capture source's Display
 
 
 ## Platform Support
