@@ -66,32 +66,134 @@ def _detect_displays_macos():
 
 
 def _detect_displays_win32():
-    """Enumerate displays on Windows via ctypes."""
+    """Enumerate displays on Windows via ctypes.
+
+    Returns display rects in physical-pixel coordinates so they match the
+    coordinate space that pynput's WH_MOUSE_LL hook reports.
+
+    Each display dict includes:
+      - ``device_name``: GDI name like ``\\\\.\\DISPLAY1``
+      - ``device_path``: PnP device interface path used by OBS 28+ as
+        ``monitor_id`` (e.g. ``\\\\?\\DISPLAY#...#{guid}``)
+
+    To get physical-pixel rects we temporarily set the calling thread's DPI
+    awareness to Per-Monitor Aware V2 before calling EnumDisplayMonitors.
+    On older Windows (pre-1607) where SetThreadDpiAwarenessContext is
+    unavailable the call is skipped — at 100 % scaling the coordinates
+    already match.
+    """
     import ctypes
     import ctypes.wintypes
+
+    # MONITORINFOEXW — extends MONITORINFO with a 32-wchar device name.
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.wintypes.DWORD),
+            ("rcMonitor", ctypes.wintypes.RECT),
+            ("rcWork", ctypes.wintypes.RECT),
+            ("dwFlags", ctypes.wintypes.DWORD),
+            ("szDevice", ctypes.c_wchar * 32),
+        ]
+
+    # DISPLAY_DEVICEW — used by EnumDisplayDevicesW to get PnP device path.
+    class DISPLAY_DEVICEW(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.wintypes.DWORD),
+            ("DeviceName", ctypes.c_wchar * 32),
+            ("DeviceString", ctypes.c_wchar * 128),
+            ("StateFlags", ctypes.wintypes.DWORD),
+            ("DeviceID", ctypes.c_wchar * 128),
+            ("DeviceKey", ctypes.c_wchar * 128),
+        ]
 
     displays = []
     user32 = ctypes.windll.user32
 
-    MONITORENUMPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_int,
-        ctypes.c_ulong,      # hMonitor
-        ctypes.c_ulong,      # hdcMonitor
-        ctypes.POINTER(ctypes.wintypes.RECT),  # lprcMonitor
-        ctypes.c_double,     # dwData
-    )
+    user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    user32.GetMonitorInfoW.restype = ctypes.wintypes.BOOL
 
-    def callback(hMonitor, hdcMonitor, lprcMonitor, dwData):
-        r = lprcMonitor[0]
-        displays.append({
-            "id": hMonitor,
-            "x": r.left, "y": r.top,
-            "w": r.right - r.left, "h": r.bottom - r.top,
-            "retina_scale": 1.0,
-        })
-        return 1  # continue enumeration
+    user32.EnumDisplayDevicesW.argtypes = [
+        ctypes.c_wchar_p, ctypes.wintypes.DWORD,
+        ctypes.POINTER(DISPLAY_DEVICEW), ctypes.wintypes.DWORD,
+    ]
+    user32.EnumDisplayDevicesW.restype = ctypes.wintypes.BOOL
 
-    user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(callback), 0)
+    # --- Temporarily switch to per-monitor DPI awareness (v2) -----------
+    # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+    old_ctx = None
+    try:
+        _SetThreadDpiAwarenessContext = user32.SetThreadDpiAwarenessContext
+        _SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        _SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        old_ctx = _SetThreadDpiAwarenessContext(
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+    except (OSError, AttributeError):
+        # Pre-Windows 10 1607 — function doesn't exist; proceed without it.
+        pass
+
+    try:
+        # HMONITOR and HDC are pointer-sized handles (8 bytes on 64-bit).
+        # LPARAM is also pointer-sized.
+        MONITORENUMPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,   # hMonitor
+            ctypes.c_void_p,   # hdcMonitor
+            ctypes.POINTER(ctypes.wintypes.RECT),  # lprcMonitor
+            ctypes.wintypes.LPARAM,                 # dwData
+        )
+
+        def callback(hMonitor, hdcMonitor, lprcMonitor, dwData):
+            r = lprcMonitor[0]
+
+            # Get GDI device name (e.g. \\.\DISPLAY1) via GetMonitorInfoW.
+            device_name = ""
+            try:
+                info = MONITORINFOEXW()
+                info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+                if user32.GetMonitorInfoW(hMonitor, ctypes.byref(info)):
+                    device_name = info.szDevice
+            except Exception:
+                pass
+
+            displays.append({
+                "id": hMonitor,
+                "x": r.left, "y": r.top,
+                "w": r.right - r.left, "h": r.bottom - r.top,
+                "retina_scale": 1.0,
+                "device_name": device_name,
+                "device_path": "",
+            })
+            return 1  # continue enumeration
+
+        user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(callback), 0)
+    finally:
+        # --- Restore previous DPI awareness context ---------------------
+        if old_ctx is not None:
+            try:
+                user32.SetThreadDpiAwarenessContext(old_ctx)
+            except (OSError, AttributeError):
+                pass
+
+    # --- Resolve PnP device interface paths for each display ------------
+    # OBS 28+ stores monitor_id as a device interface path (e.g.
+    # \\?\DISPLAY#HW_ID#INSTANCE#{GUID}).  EnumDisplayDevicesW with
+    # EDD_GET_DEVICE_INTERFACE_NAME gives us this path for each GDI name.
+    EDD_GET_DEVICE_INTERFACE_NAME = 0x00000001
+    for d in displays:
+        dev_name = d.get("device_name", "")
+        if not dev_name:
+            continue
+        try:
+            dd = DISPLAY_DEVICEW()
+            dd.cb = ctypes.sizeof(DISPLAY_DEVICEW)
+            if user32.EnumDisplayDevicesW(
+                    dev_name, 0, ctypes.byref(dd),
+                    EDD_GET_DEVICE_INTERFACE_NAME):
+                d["device_path"] = dd.DeviceID
+        except Exception:
+            pass
+
     return displays
 
 
@@ -306,9 +408,13 @@ def _refresh_displays():
         pass
     # Log detected configuration for debugging multi-monitor issues
     for i, d in enumerate(_all_displays):
+        dev = d.get('device_name', '')
+        path = d.get('device_path', '')
         obs.script_log(obs.LOG_INFO,
                        f"Click Pop: display {i}: {d['w']}x{d['h']} "
-                       f"@ ({d['x']},{d['y']}) retina={d.get('retina_scale',1.0)}")
+                       f"@ ({d['x']},{d['y']}) retina={d.get('retina_scale',1.0)}"
+                       f"{' dev=' + dev if dev else ''}"
+                       f"{' path=' + path if path else ''}")
     if _captured_display:
         obs.script_log(obs.LOG_INFO,
                        f"Click Pop: captured display: "
@@ -617,8 +723,27 @@ def _resolve_captured_display():
                     _captured_display = _all_displays[display_idx]
                     return
         elif sys.platform == "win32":
-            # Windows monitor_capture: "monitor" is a 0-based index
+            # OBS 28+ stores monitor_id as a PnP device interface path
+            # (e.g. \\?\DISPLAY#HW_ID#INSTANCE#{GUID}).
+            # Older OBS used a 0-based int "monitor".
+            monitor_id = obs.obs_data_get_string(settings, "monitor_id")
             monitor_idx = obs.obs_data_get_int(settings, "monitor")
+            obs.script_log(obs.LOG_INFO,
+                           f"Click Pop: resolving monitor_capture — "
+                           f"monitor_id={monitor_id!r}, "
+                           f"monitor={monitor_idx}")
+
+            # 1. Match by device interface path (OBS 28+)
+            if monitor_id:
+                for d in _all_displays:
+                    if d.get("device_path") == monitor_id:
+                        _captured_display = d
+                        obs.script_log(obs.LOG_INFO,
+                                       f"Click Pop: matched display by "
+                                       f"device path")
+                        return
+
+            # 2. Fall back to monitor index (legacy OBS)
             if 0 <= monitor_idx < len(_all_displays):
                 _captured_display = _all_displays[monitor_idx]
                 return
