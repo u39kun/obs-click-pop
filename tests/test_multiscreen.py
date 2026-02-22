@@ -33,6 +33,16 @@ SINGLE = [
     {"id": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
 ]
 
+# Windows DPI-scaled dual-monitor layout in *physical* pixel coordinates.
+# Primary: 3840x2160 panel at 150 % → logical 2560x1440, physical 3840x2160.
+# Secondary: 1920x1080 at 100 % → starts at physical x=3840.
+# After the DPI fix, _detect_displays_win32 returns physical-pixel rects
+# which is what pynput reports, so find_display_for_point must work with these.
+DUAL_DPI_PHYSICAL = [
+    {"id": 1, "x": 0, "y": 0, "w": 3840, "h": 2160, "retina_scale": 1.0},
+    {"id": 2, "x": 3840, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
+]
+
 
 # ---------------------------------------------------------------------------
 # find_display_for_point tests
@@ -330,3 +340,83 @@ class TestSingleDisplayRegression:
         )
         # Same result as the old single-display code path
         assert result == pytest.approx((920.0, 500.0), abs=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Windows DPI scaling regression tests
+# ---------------------------------------------------------------------------
+
+class TestDpiScalingRegression:
+    """Verify that physical-pixel display rects (post-DPI fix) work correctly.
+
+    After the DPI fix, _detect_displays_win32() returns physical-pixel
+    coordinates which match what pynput's WH_MOUSE_LL hook reports.
+    These tests confirm that find_display_for_point and map_coords handle
+    these physical-pixel values correctly.
+    """
+
+    def test_click_center_primary_4k_display(self):
+        """Click at center of a 4K primary display (physical pixels)."""
+        d = find_display_for_point(1920, 1080, DUAL_DPI_PHYSICAL)
+        assert d is DUAL_DPI_PHYSICAL[0]
+
+    def test_click_on_secondary_after_4k_primary(self):
+        """Click on secondary display whose origin is at physical x=3840."""
+        d = find_display_for_point(4000, 500, DUAL_DPI_PHYSICAL)
+        assert d is DUAL_DPI_PHYSICAL[1]
+
+    def test_click_at_boundary_4k_to_secondary(self):
+        """x=3840 is the first pixel of the secondary display."""
+        d = find_display_for_point(3840, 0, DUAL_DPI_PHYSICAL)
+        assert d is DUAL_DPI_PHYSICAL[1]
+
+    def test_click_last_pixel_4k_primary(self):
+        """x=3839 is the last pixel of the 4K primary."""
+        d = find_display_for_point(3839, 500, DUAL_DPI_PHYSICAL)
+        assert d is DUAL_DPI_PHYSICAL[0]
+
+    def test_map_coords_center_of_4k_display(self):
+        """Map center of physical 3840x2160 to a 1920x1080 canvas."""
+        display = DUAL_DPI_PHYSICAL[0]
+        gx, gy = 1920, 1080  # center of 3840x2160
+
+        local_x = gx - display["x"]
+        local_y = gy - display["y"]
+
+        result = map_coords(
+            local_x, local_y,
+            1920, 1080,
+            display["w"], display["h"],
+            80,
+        )
+        # scale_x = 1920/3840 = 0.5, scale_y = 1080/2160 = 0.5
+        # obs_x = 1920 * 0.5 - 40 = 920
+        # obs_y = 1080 * 0.5 - 40 = 500
+        assert result == pytest.approx((920.0, 500.0))
+
+    def test_map_coords_secondary_after_4k(self):
+        """Map center of secondary 1920x1080 (origin at physical x=3840)."""
+        display = DUAL_DPI_PHYSICAL[1]
+        gx, gy = 3840 + 960, 540  # center of secondary
+
+        local_x = gx - display["x"]  # 960
+        local_y = gy - display["y"]  # 540
+
+        result = map_coords(
+            local_x, local_y,
+            1920, 1080,
+            display["w"], display["h"],
+            80,
+        )
+        # 1:1 mapping (1920x1080 → 1920x1080)
+        # obs_x = 960 * 1.0 - 40 = 920
+        # obs_y = 540 * 1.0 - 40 = 500
+        assert result == pytest.approx((920.0, 500.0))
+
+    def test_discard_secondary_when_4k_captured(self):
+        """Clicks on secondary should be discarded when 4K primary is captured."""
+        captured = DUAL_DPI_PHYSICAL[0]
+        display = find_display_for_point(4000, 500, DUAL_DPI_PHYSICAL)
+        assert display is not captured
+        # _spawn_circle would discard this click
+        assert display is DUAL_DPI_PHYSICAL[1]
