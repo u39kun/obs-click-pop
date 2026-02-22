@@ -9,6 +9,7 @@ from click_pop_core import map_coords, allocate_slot, expire_circles
 
 def _detect_screen_size():
     """Return (width, height) of the primary screen, or (1920, 1080)."""
+    global _retina_scale
     import subprocess
     try:
         if sys.platform == "win32":
@@ -16,6 +17,28 @@ def _detect_screen_size():
             user32 = ctypes.windll.user32
             return (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
         elif sys.platform == "darwin":
+            # Prefer Quartz for logical (point) dimensions – these match
+            # the coordinate space that pynput reports on macOS.
+            # system_profiler returns physical pixels on Retina displays,
+            # which would be 2x the logical size and break positioning.
+            try:
+                import Quartz
+                display_id = Quartz.CGMainDisplayID()
+                bounds = Quartz.CGDisplayBounds(display_id)
+                w, h = int(bounds.size.width), int(bounds.size.height)
+                # Detect Retina backing scale factor so we can convert
+                # pynput logical-point coords to physical pixels later.
+                try:
+                    mode = Quartz.CGDisplayCopyDisplayMode(display_id)
+                    if mode is not None:
+                        pw = Quartz.CGDisplayModeGetPixelWidth(mode)
+                        if pw and w > 0:
+                            _retina_scale = pw / w
+                except Exception:
+                    pass
+                return (w, h)
+            except Exception:
+                pass
             out = subprocess.check_output(
                 ["system_profiler", "SPDisplaysDataType"],
                 text=True, timeout=5,
@@ -23,7 +46,8 @@ def _detect_screen_size():
             import re
             m = re.search(r"Resolution:\s+(\d+)\s*x\s*(\d+)", out)
             if m:
-                return (int(m.group(1)), int(m.group(2)))
+                w, h = int(m.group(1)), int(m.group(2))
+                return (w, h)
         else:
             out = subprocess.check_output(
                 ["xrandr", "--query"], text=True, timeout=5,
@@ -43,6 +67,7 @@ _listener = None          # pynput Listener thread
 _click_queue = deque()    # thread‑safe (deque.append / popleft are atomic in CPython)
 _timer_active = False
 _active_clicks = []       # list of (source_name, expire_time)
+_retina_scale = 1.0       # macOS Retina backing scale factor (2.0 on HiDPI)
 
 # Settings with defaults
 _settings = {
@@ -422,8 +447,17 @@ def _spawn_circle(x, y, is_left, expire_time):
                       capture_pos_x=pos_x, capture_pos_y=pos_y,
                       capture_scale_x=scale_x, capture_scale_y=scale_y)
 
-    obs_x, obs_y = map_coords(x, y, canvas_w, canvas_h,
-                              _settings["monitor_w"], _settings["monitor_h"],
+    # On macOS Retina, pynput reports logical "points" but OBS and the
+    # capture source work in physical pixels (2x on HiDPI).  Scale both
+    # the mouse coords and monitor dimensions so everything is in the
+    # same pixel space.  _retina_scale is 1.0 on non-Retina / non-macOS.
+    phys_x = x * _retina_scale
+    phys_y = y * _retina_scale
+    phys_mon_w = _settings["monitor_w"] * _retina_scale
+    phys_mon_h = _settings["monitor_h"] * _retina_scale
+
+    obs_x, obs_y = map_coords(phys_x, phys_y, canvas_w, canvas_h,
+                              phys_mon_w, phys_mon_h,
                               size, **kwargs)
 
     _show_source(src_name, image_path, obs_x, obs_y, size)
