@@ -112,7 +112,7 @@ You need to click on "Refresh Displays":
 
 - No drag visualization (only click points)
 - Circle appears at click position instantly (no fade-in/fade-out animation)
-- Multi-monitor setups are untested
+- Multi-monitor setups were tested on macOS only
 
 
 ## How It Works
