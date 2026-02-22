@@ -22,6 +22,9 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
 - Correct handling of OBS bounding box scaling modes (Scale Inner, Stretch, etc.)
 - Configurable circle size, duration, and max simultaneous circles
 - Works on 4K monitors with scaled canvas output
+- Supports multi-monitor setups
+- Supports Retina displays
+- Supports Windows, macOS, Linux (X11)
 
 ## Files
 
@@ -38,7 +41,7 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
 
 ### Prerequisites
 
-- **OBS Studio 30+** (tested with 32.0.2)
+- **OBS Studio 30+** (tested with 32.0.2 and 32.0.4)
 - **Python 3.12** (must match the version OBS was built against)
 - **pynput** package (installed into the same Python — see platform steps below)
 
@@ -74,7 +77,7 @@ If your distro's OBS package was built against a different Python version, match
    - **Left/Right-click images** — what overlay graphic to use for left and right clicks. By default, red and blue circles are used.
    - **Circle duration** — how long each indicator stays visible (default 350 ms)
    - **Circle diameter** — size in pixels (default 60)
-   - **Monitor width/height** — your display resolution (auto-detected)
+   - **Monitor width/height** — your display resolution (auto-detected but overrideable)
    - **Max simultaneous circles** — how many indicators can show at once (default 5)
    - **Display Capture source** — select your Display Capture from the dropdown for crop-aware positioning (leave blank if no crop is applied)
 4. Click **Start Listener**
@@ -88,6 +91,14 @@ If your Display Capture source is cropped to a sub-region of your screen, select
 ## Customization
 
 Replace the PNG files with your own designs. Any transparent PNG works — the script will scale it to the configured circle diameter.
+
+
+## Tips
+
+You need to click on "Refresh Displays":
+- after you add or remove Screen Capture sources
+- after you change monitor connections on your machine
+- after you change a Screen Capture source's Display
 
 
 ## Platform Support
@@ -104,7 +115,6 @@ Replace the PNG files with your own designs. Any transparent PNG works — the s
 
 - No drag visualization (only click points)
 - Circle appears at click position instantly (no fade-in/fade-out animation)
-- Multi-monitor setups are untested
 
 
 ## How It Works

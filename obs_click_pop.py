@@ -4,60 +4,123 @@ import time
 import os
 from collections import deque
 
-from click_pop_core import map_coords, allocate_slot, expire_circles
+from click_pop_core import map_coords, allocate_slot, expire_circles, find_display_for_point
+
+
+# ---------------------------------------------------------------------------
+# Display detection
+# ---------------------------------------------------------------------------
+
+def _detect_all_displays():
+    """Return a list of display descriptors for all connected monitors.
+
+    Each descriptor is a dict with keys:
+      id            – platform display identifier
+      x, y          – origin in virtual desktop space (logical points)
+      w, h          – logical resolution
+      retina_scale  – backing scale factor (2.0 on macOS Retina, else 1.0)
+
+    Falls back to a single 1920x1080 display if detection fails.
+    """
+    import subprocess
+    displays = []
+    try:
+        if sys.platform == "win32":
+            displays = _detect_displays_win32()
+        elif sys.platform == "darwin":
+            displays = _detect_displays_macos()
+        else:
+            displays = _detect_displays_linux()
+    except Exception:
+        pass
+    if not displays:
+        displays = [{"id": 0, "x": 0, "y": 0, "w": 1920, "h": 1080,
+                      "retina_scale": 1.0}]
+    return displays
+
+
+def _detect_displays_macos():
+    """Enumerate displays on macOS via Quartz."""
+    import Quartz
+    max_displays = 16
+    (err, display_ids, count) = Quartz.CGGetActiveDisplayList(max_displays, None, None)
+    if err != 0:
+        return []
+    displays = []
+    for did in display_ids[:count]:
+        bounds = Quartz.CGDisplayBounds(did)
+        w, h = int(bounds.size.width), int(bounds.size.height)
+        x, y = int(bounds.origin.x), int(bounds.origin.y)
+        retina_scale = 1.0
+        try:
+            mode = Quartz.CGDisplayCopyDisplayMode(did)
+            if mode is not None:
+                pw = Quartz.CGDisplayModeGetPixelWidth(mode)
+                if pw and w > 0:
+                    retina_scale = pw / w
+        except Exception:
+            pass
+        displays.append({"id": did, "x": x, "y": y, "w": w, "h": h,
+                          "retina_scale": retina_scale})
+    return displays
+
+
+def _detect_displays_win32():
+    """Enumerate displays on Windows via ctypes."""
+    import ctypes
+    import ctypes.wintypes
+
+    displays = []
+    user32 = ctypes.windll.user32
+
+    MONITORENUMPROC = ctypes.WINFUNCTYPE(
+        ctypes.c_int,
+        ctypes.c_ulong,      # hMonitor
+        ctypes.c_ulong,      # hdcMonitor
+        ctypes.POINTER(ctypes.wintypes.RECT),  # lprcMonitor
+        ctypes.c_double,     # dwData
+    )
+
+    def callback(hMonitor, hdcMonitor, lprcMonitor, dwData):
+        r = lprcMonitor[0]
+        displays.append({
+            "id": hMonitor,
+            "x": r.left, "y": r.top,
+            "w": r.right - r.left, "h": r.bottom - r.top,
+            "retina_scale": 1.0,
+        })
+        return 1  # continue enumeration
+
+    user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(callback), 0)
+    return displays
+
+
+def _detect_displays_linux():
+    """Enumerate displays on Linux via xrandr."""
+    import subprocess, re
+    out = subprocess.check_output(["xrandr", "--query"], text=True, timeout=5)
+    displays = []
+    idx = 0
+    for m in re.finditer(r"(\d+)x(\d+)\+(\d+)\+(\d+)", out):
+        w, h, x, y = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        displays.append({"id": idx, "x": x, "y": y, "w": w, "h": h,
+                          "retina_scale": 1.0})
+        idx += 1
+    return displays
 
 
 def _detect_screen_size():
-    """Return (width, height) of the primary screen, or (1920, 1080)."""
-    global _retina_scale
-    import subprocess
-    try:
-        if sys.platform == "win32":
-            import ctypes
-            user32 = ctypes.windll.user32
-            return (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
-        elif sys.platform == "darwin":
-            # Prefer Quartz for logical (point) dimensions – these match
-            # the coordinate space that pynput reports on macOS.
-            # system_profiler returns physical pixels on Retina displays,
-            # which would be 2x the logical size and break positioning.
-            try:
-                import Quartz
-                display_id = Quartz.CGMainDisplayID()
-                bounds = Quartz.CGDisplayBounds(display_id)
-                w, h = int(bounds.size.width), int(bounds.size.height)
-                # Detect Retina backing scale factor so we can convert
-                # pynput logical-point coords to physical pixels later.
-                try:
-                    mode = Quartz.CGDisplayCopyDisplayMode(display_id)
-                    if mode is not None:
-                        pw = Quartz.CGDisplayModeGetPixelWidth(mode)
-                        if pw and w > 0:
-                            _retina_scale = pw / w
-                except Exception:
-                    pass
-                return (w, h)
-            except Exception:
-                pass
-            out = subprocess.check_output(
-                ["system_profiler", "SPDisplaysDataType"],
-                text=True, timeout=5,
-            )
-            import re
-            m = re.search(r"Resolution:\s+(\d+)\s*x\s*(\d+)", out)
-            if m:
-                w, h = int(m.group(1)), int(m.group(2))
-                return (w, h)
-        else:
-            out = subprocess.check_output(
-                ["xrandr", "--query"], text=True, timeout=5,
-            )
-            import re
-            m = re.search(r"(\d+)x(\d+)\+0\+0", out)
-            if m:
-                return (int(m.group(1)), int(m.group(2)))
-    except Exception:
-        pass
+    """Return (width, height) of the primary screen, or (1920, 1080).
+
+    Thin wrapper for backward compatibility — uses the first display from
+    ``_detect_all_displays()``.
+    """
+    global _retina_scale, _all_displays
+    _all_displays = _detect_all_displays()
+    if _all_displays:
+        d = _all_displays[0]
+        _retina_scale = d.get("retina_scale", 1.0)
+        return (d["w"], d["h"])
     return (1920, 1080)
 
 # ---------------------------------------------------------------------------
@@ -68,6 +131,8 @@ _click_queue = deque()    # thread‑safe (deque.append / popleft are atomic in 
 _timer_active = False
 _active_clicks = []       # list of (source_name, expire_time)
 _retina_scale = 1.0       # macOS Retina backing scale factor (2.0 on HiDPI)
+_all_displays = []        # list of display descriptors from _detect_all_displays()
+_captured_display = None  # display dict for the monitor being captured (or None)
 
 # Settings with defaults
 _settings = {
@@ -79,6 +144,7 @@ _settings = {
     "monitor_h": 1080,
     "max_circles": 5,
     "capture_source": "",
+    "override_monitor": False,
 }
 
 # ---------------------------------------------------------------------------
@@ -111,12 +177,22 @@ def script_properties():
     obs.obs_properties_add_int(
         props, "circle_size", "Circle diameter (px)", 20, 300, 5,
     )
-    obs.obs_properties_add_int(
+
+    override_prop = obs.obs_properties_add_bool(
+        props, "override_monitor", "Override monitor dimensions",
+    )
+    obs.obs_property_set_modified_callback(override_prop, _on_override_toggle)
+
+    p_w = obs.obs_properties_add_int(
         props, "monitor_w", "Monitor width (px)", 640, 7680, 1,
     )
-    obs.obs_properties_add_int(
+    p_h = obs.obs_properties_add_int(
         props, "monitor_h", "Monitor height (px)", 480, 4320, 1,
     )
+    # Hide manual dimension fields when override is off
+    obs.obs_property_set_visible(p_w, _settings["override_monitor"])
+    obs.obs_property_set_visible(p_h, _settings["override_monitor"])
+
     obs.obs_properties_add_int(
         props, "max_circles", "Max circles per click type", 1, 20, 1,
     )
@@ -128,12 +204,47 @@ def script_properties():
     obs.obs_property_list_add_string(capture_list, "(none)", "")
     _populate_capture_list(capture_list)
     obs.obs_properties_add_button(
+        props, "btn_refresh", "Refresh Displays", _on_refresh_displays,
+    )
+    obs.obs_properties_add_button(
         props, "btn_start", "Start Listener", _on_start,
     )
     obs.obs_properties_add_button(
         props, "btn_stop", "Stop Listener", _on_stop,
     )
+
+    # Show detected displays as informational text
+    _add_display_info(props)
+
     return props
+
+
+def _on_override_toggle(props, prop, settings):
+    """Show/hide manual monitor dimension fields when checkbox is toggled."""
+    override = obs.obs_data_get_bool(settings, "override_monitor")
+    p_w = obs.obs_properties_get(props, "monitor_w")
+    p_h = obs.obs_properties_get(props, "monitor_h")
+    obs.obs_property_set_visible(p_w, override)
+    obs.obs_property_set_visible(p_h, override)
+    return True
+
+
+def _add_display_info(props):
+    """Add informational text showing detected displays."""
+    if not _all_displays:
+        return
+    lines = ["Detected displays:"]
+    for i, d in enumerate(_all_displays):
+        retina = d.get("retina_scale", 1.0)
+        label = f"  Display {i + 1}: {d['w']}x{d['h']} @ ({d['x']},{d['y']})"
+        if retina != 1.0:
+            label += f" [{retina:.0f}x Retina]"
+        if _captured_display is d:
+            label += " [CAPTURED]"
+        lines.append(label)
+    obs.obs_properties_add_text(
+        props, "_display_info", "\n".join(lines), obs.OBS_TEXT_INFO,
+    )
 
 
 def script_defaults(settings):
@@ -151,6 +262,7 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings, "monitor_h", mon_h)
     obs.obs_data_set_default_int(settings, "max_circles", 5)
     obs.obs_data_set_default_string(settings, "capture_source", "")
+    obs.obs_data_set_default_bool(settings, "override_monitor", False)
 
 
 def script_update(settings):
@@ -158,10 +270,18 @@ def script_update(settings):
     _settings["right_image"] = obs.obs_data_get_string(settings, "right_image")
     _settings["duration_ms"] = obs.obs_data_get_int(settings, "duration_ms")
     _settings["circle_size"] = obs.obs_data_get_int(settings, "circle_size")
+    _settings["override_monitor"] = obs.obs_data_get_bool(settings, "override_monitor")
     _settings["monitor_w"] = obs.obs_data_get_int(settings, "monitor_w")
     _settings["monitor_h"] = obs.obs_data_get_int(settings, "monitor_h")
     _settings["max_circles"] = obs.obs_data_get_int(settings, "max_circles")
     _settings["capture_source"] = obs.obs_data_get_string(settings, "capture_source")
+    # Re-resolve which display is being captured when settings change
+    _refresh_displays()
+    # Auto-set monitor dimensions from captured display when not overridden
+    if not _settings["override_monitor"]:
+        if _captured_display is not None:
+            _settings["monitor_w"] = _captured_display["w"]
+            _settings["monitor_h"] = _captured_display["h"]
 
 
 def script_unload():
@@ -172,6 +292,48 @@ def script_unload():
 # ---------------------------------------------------------------------------
 # Listener management
 # ---------------------------------------------------------------------------
+
+def _refresh_displays():
+    """Re-enumerate displays and resolve the captured display."""
+    global _all_displays, _retina_scale
+    _all_displays = _detect_all_displays()
+    # Update _retina_scale from the primary display for backward compat
+    if _all_displays:
+        _retina_scale = _all_displays[0].get("retina_scale", 1.0)
+    try:
+        _resolve_captured_display()
+    except Exception:
+        pass
+    # Log detected configuration for debugging multi-monitor issues
+    for i, d in enumerate(_all_displays):
+        obs.script_log(obs.LOG_INFO,
+                       f"Click Pop: display {i}: {d['w']}x{d['h']} "
+                       f"@ ({d['x']},{d['y']}) retina={d.get('retina_scale',1.0)}")
+    if _captured_display:
+        obs.script_log(obs.LOG_INFO,
+                       f"Click Pop: captured display: "
+                       f"{_captured_display['w']}x{_captured_display['h']} "
+                       f"@ ({_captured_display['x']},{_captured_display['y']})")
+    else:
+        obs.script_log(obs.LOG_INFO,
+                       "Click Pop: no captured display resolved — "
+                       "clicks on all displays will show circles")
+
+
+def _on_refresh_displays(props, prop):
+    _refresh_displays()
+    # Repopulate the Display Capture source dropdown
+    capture_list = obs.obs_properties_get(props, "capture_source")
+    if capture_list is not None:
+        obs.obs_property_list_clear(capture_list)
+        obs.obs_property_list_add_string(capture_list, "(none)", "")
+        _populate_capture_list(capture_list)
+    n = len(_all_displays)
+    cap = "yes" if _captured_display else "no"
+    obs.script_log(obs.LOG_INFO,
+                   f"Click Pop: refreshed — {n} display(s), captured={cap}")
+    return True
+
 
 def _on_start(props, prop):
     _start_listener()
@@ -309,6 +471,171 @@ def _get_filter_crop(source):
     return (left, top, right, bottom)
 
 
+def _display_uuid_via_ctypes(display_id):
+    """Get the UUID string for a CGDirectDisplayID using ctypes.
+
+    PyObjC doesn't expose ``CGDisplayCreateUUIDFromDisplayID`` in all
+    environments (notably the Python bundled with OBS), so we call the
+    CoreGraphics C function directly via ctypes.
+
+    Returns a UUID string like ``"09FA8E3F-DD10-3AB8-E04B-86F97A791ED1"``
+    or ``None`` on failure.
+    """
+    import ctypes
+
+    # CGDisplayCreateUUIDFromDisplayID lives in the ColorSync framework
+    # (not CoreGraphics) on modern macOS.
+    cs = ctypes.cdll.LoadLibrary(
+        "/System/Library/Frameworks/ColorSync.framework/ColorSync")
+    cf = ctypes.cdll.LoadLibrary(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+
+    cs.CGDisplayCreateUUIDFromDisplayID.argtypes = [ctypes.c_uint32]
+    cs.CGDisplayCreateUUIDFromDisplayID.restype = ctypes.c_void_p
+
+    cf.CFUUIDCreateString.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    cf.CFUUIDCreateString.restype = ctypes.c_void_p
+
+    cf.CFStringGetCStringPtr.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    cf.CFStringGetCStringPtr.restype = ctypes.c_char_p
+
+    cf.CFStringGetLength.argtypes = [ctypes.c_void_p]
+    cf.CFStringGetLength.restype = ctypes.c_long
+
+    cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                      ctypes.c_long, ctypes.c_uint32]
+    cf.CFStringGetCString.restype = ctypes.c_bool
+
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    cf.CFRelease.restype = None
+
+    kCFStringEncodingUTF8 = 0x08000100
+
+    uuid_ref = cs.CGDisplayCreateUUIDFromDisplayID(
+        ctypes.c_uint32(int(display_id)))
+    if not uuid_ref:
+        return None
+
+    str_ref = cf.CFUUIDCreateString(None, uuid_ref)
+    if not str_ref:
+        cf.CFRelease(uuid_ref)
+        return None
+
+    result = None
+    c_str = cf.CFStringGetCStringPtr(str_ref, kCFStringEncodingUTF8)
+    if c_str:
+        result = c_str.decode("utf-8")
+    else:
+        length = cf.CFStringGetLength(str_ref)
+        buf = ctypes.create_string_buffer(length * 4 + 1)
+        if cf.CFStringGetCString(str_ref, buf, len(buf), kCFStringEncodingUTF8):
+            result = buf.value.decode("utf-8")
+
+    cf.CFRelease(str_ref)
+    cf.CFRelease(uuid_ref)
+    return result
+
+
+def _resolve_captured_display():
+    """Determine which physical display the selected capture source records.
+
+    Reads platform-specific properties from the Display Capture source and
+    matches against ``_all_displays``.  Sets the module-level
+    ``_captured_display`` to the matching display dict, or leaves it as
+    ``None`` if no confident match is found (in which case no clicks are
+    discarded — better to show extra circles than miss all of them).
+    """
+    global _captured_display
+    _captured_display = None
+
+    name = _settings.get("capture_source", "")
+    if not name or not _all_displays:
+        return
+
+    source = obs.obs_get_source_by_name(name)
+    if source is None:
+        return
+
+    src_id = obs.obs_source_get_unversioned_id(source)
+    settings = obs.obs_source_get_settings(source)
+
+    try:
+        if sys.platform == "darwin":
+            if src_id.startswith("screen_capture"):
+                display_val = obs.obs_data_get_int(settings, "display")
+                display_uuid = obs.obs_data_get_string(settings, "display_uuid")
+                obs.script_log(obs.LOG_INFO,
+                               f"Click Pop: resolving screen_capture — "
+                               f"src_id={src_id!r}, display={display_val}, "
+                               f"display_uuid={display_uuid!r}, "
+                               f"known IDs={[int(d['id']) for d in _all_displays]}")
+
+                # 1. Try UUID match via ctypes (primary method for OBS 30+)
+                if display_uuid:
+                    norm_uuid = display_uuid.strip("{}").upper()
+                    try:
+                        for d in _all_displays:
+                            d_uuid = _display_uuid_via_ctypes(d["id"])
+                            if d_uuid and d_uuid.strip("{}").upper() == norm_uuid:
+                                _captured_display = d
+                                obs.script_log(obs.LOG_INFO,
+                                               f"Click Pop: matched display by UUID")
+                                return
+                    except Exception as exc:
+                        obs.script_log(obs.LOG_INFO,
+                                       f"Click Pop: UUID matching failed: {exc}")
+
+                # 2. Fall back to CGDirectDisplayID match
+                if display_val:
+                    for d in _all_displays:
+                        if int(d["id"]) == int(display_val):
+                            _captured_display = d
+                            obs.script_log(obs.LOG_INFO,
+                                           f"Click Pop: matched display by ID")
+                            return
+
+                # 3. Fall back to source output dimensions
+                src_w = obs.obs_source_get_width(source)
+                src_h = obs.obs_source_get_height(source)
+                if src_w and src_h:
+                    for d in _all_displays:
+                        phys_w = int(d["w"] * d.get("retina_scale", 1.0))
+                        phys_h = int(d["h"] * d.get("retina_scale", 1.0))
+                        if phys_w == src_w and phys_h == src_h:
+                            _captured_display = d
+                            obs.script_log(obs.LOG_INFO,
+                                           f"Click Pop: matched display by "
+                                           f"dimensions {src_w}x{src_h}")
+                            return
+
+                obs.script_log(obs.LOG_INFO,
+                               "Click Pop: screen_capture display match failed")
+            elif src_id.startswith("display_capture"):
+                # Legacy display_capture: "display" is a 0-based index
+                display_idx = obs.obs_data_get_int(settings, "display")
+                if 0 <= display_idx < len(_all_displays):
+                    _captured_display = _all_displays[display_idx]
+                    return
+        elif sys.platform == "win32":
+            # Windows monitor_capture: "monitor" is a 0-based index
+            monitor_idx = obs.obs_data_get_int(settings, "monitor")
+            if 0 <= monitor_idx < len(_all_displays):
+                _captured_display = _all_displays[monitor_idx]
+                return
+        else:
+            # Linux xshm_input: "screen" is typically 0 for first X screen
+            screen_idx = obs.obs_data_get_int(settings, "screen")
+            if 0 <= screen_idx < len(_all_displays):
+                _captured_display = _all_displays[screen_idx]
+                return
+    except Exception as exc:
+        obs.script_log(obs.LOG_INFO,
+                       f"Click Pop: _resolve_captured_display error: {exc}")
+    finally:
+        obs.obs_data_release(settings)
+        obs.obs_source_release(source)
+
+
 def _get_capture_transform(scene):
     """Read crop / position / scale from the named Display Capture source.
 
@@ -420,7 +747,41 @@ def _poll_clicks():
 
 
 def _spawn_circle(x, y, is_left, expire_time):
-    """Create or reuse an image source and position it at (x, y)."""
+    """Create or reuse an image source and position it at (x, y).
+
+    Coordinates (x, y) are in virtual-desktop space (as reported by pynput).
+    Multi-monitor aware: determines which display was clicked, converts to
+    display-local coordinates, and discards clicks on non-captured displays.
+    """
+    # --- Multi-monitor: determine which display the click landed on ---
+    # Only use per-display logic when multiple displays are detected.
+    # Single-display setups fall through to the legacy path so that the
+    # user's manual monitor_w / monitor_h settings are always respected.
+    display = None
+    if len(_all_displays) > 1:
+        display = find_display_for_point(x, y, _all_displays)
+
+        # If a specific display is being captured, discard clicks on other
+        # displays.  Only applies when we have multiple displays — single
+        # display should never discard.
+        if _captured_display is not None and display is not _captured_display:
+            return
+
+    # Use display-specific values when a multi-monitor hit was found,
+    # otherwise fall back to settings (preserves single-display behavior).
+    if display is not None:
+        local_x = x - display["x"]
+        local_y = y - display["y"]
+        mon_w = display["w"]
+        mon_h = display["h"]
+        retina = display.get("retina_scale", 1.0)
+    else:
+        local_x = x
+        local_y = y
+        mon_w = _settings["monitor_w"]
+        mon_h = _settings["monitor_h"]
+        retina = _retina_scale
+
     # Pick a source name from a pool so we can show multiple simultaneous
     prefix = "__click_pop_L_" if is_left else "__click_pop_R_"
     max_c = _settings["max_circles"]
@@ -450,11 +811,11 @@ def _spawn_circle(x, y, is_left, expire_time):
     # On macOS Retina, pynput reports logical "points" but OBS and the
     # capture source work in physical pixels (2x on HiDPI).  Scale both
     # the mouse coords and monitor dimensions so everything is in the
-    # same pixel space.  _retina_scale is 1.0 on non-Retina / non-macOS.
-    phys_x = x * _retina_scale
-    phys_y = y * _retina_scale
-    phys_mon_w = _settings["monitor_w"] * _retina_scale
-    phys_mon_h = _settings["monitor_h"] * _retina_scale
+    # same pixel space.  retina is 1.0 on non-Retina / non-macOS.
+    phys_x = local_x * retina
+    phys_y = local_y * retina
+    phys_mon_w = mon_w * retina
+    phys_mon_h = mon_h * retina
 
     obs_x, obs_y = map_coords(phys_x, phys_y, canvas_w, canvas_h,
                               phys_mon_w, phys_mon_h,
@@ -491,6 +852,13 @@ def _show_source(name, image_path, x, y, size):
             settings = obs.obs_data_create()
             obs.obs_data_set_string(settings, "file", image_path)
             source = obs.obs_source_create("image_source", name, settings, None)
+            obs.obs_data_release(settings)
+        else:
+            # Update image path on reused source (may be stale from a
+            # previous session or OBS restart).
+            settings = obs.obs_source_get_settings(source)
+            obs.obs_data_set_string(settings, "file", image_path)
+            obs.obs_source_update(source, settings)
             obs.obs_data_release(settings)
         scene_item = obs.obs_scene_add(scene, source)
         obs.obs_source_release(source)

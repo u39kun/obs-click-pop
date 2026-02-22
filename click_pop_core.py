@@ -1,3 +1,14 @@
+def find_display_for_point(x, y, displays):
+    """Return the display dict whose bounds contain (x, y), or None.
+
+    Each display dict must have keys: x, y, w, h (origin and logical size).
+    """
+    for d in displays:
+        if d["x"] <= x < d["x"] + d["w"] and d["y"] <= y < d["y"] + d["h"]:
+            return d
+    return None
+
+
 def map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, circle_size,
                crop_left=0, crop_top=0, capture_pos_x=0, capture_pos_y=0,
                capture_scale_x=None, capture_scale_y=None):
