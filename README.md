@@ -22,6 +22,9 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
 - Correct handling of OBS bounding box scaling modes (Scale Inner, Stretch, etc.)
 - Configurable circle size, duration, and max simultaneous circles
 - Works on 4K monitors with scaled canvas output
+- Supports multi-monitor setups
+- Supports Retina displays
+- Supports Windows, macOS, Linux (X11)
 
 ## Files
 
@@ -38,7 +41,7 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
 
 ### Prerequisites
 
-- **OBS Studio 30+** (tested with 32.0.2)
+- **OBS Studio 30+** (tested with 32.0.2 and 32.0.4)
 - **Python 3.12** (must match the version OBS was built against)
 - **pynput** package (installed into the same Python — see platform steps below)
 
@@ -112,7 +115,6 @@ You need to click on "Refresh Displays":
 
 - No drag visualization (only click points)
 - Circle appears at click position instantly (no fade-in/fade-out animation)
-- Multi-monitor setups were tested on macOS only
 
 
 ## How It Works
