@@ -429,7 +429,7 @@ class TestDpiScalingRegression:
 class TestMultiCaptureRouting:
     """Test the routing logic used when multi-capture mode is active.
 
-    Replicates the _spawn_circle decision logic for the "__all__" mode:
+    Replicates the _spawn_circle decision logic for the "(all - auto detect)" mode:
     - find_display_for_point to determine which display the click hit
     - look up display["id"] in _display_capture_map
     - return the source name if mapped, or discard if not
@@ -504,3 +504,91 @@ class TestMultiCaptureRouting:
         """When no sources are mapped, all clicks are discarded."""
         result = self._route_click(100, 200, DUAL_SIDE_BY_SIDE, {})
         assert result is None
+
+
+# Two identical 1920x1080 displays side-by-side (user's exact setup)
+DUAL_IDENTICAL = [
+    {"id": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
+    {"id": 2, "x": 1920, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
+]
+
+
+# ---------------------------------------------------------------------------
+# Virtual desktop fallback tests (no capture source selected)
+# ---------------------------------------------------------------------------
+
+class TestVirtualDesktopFallback:
+    """Test coordinate mapping when no capture source is configured.
+
+    When transform is None and multiple displays are detected,
+    _spawn_circle should use global coords mapped across the entire
+    virtual desktop extent — NOT display-local coords with a single
+    monitor's dimensions (which would produce a wrong scale factor
+    like canvas_w / mon_w = 3840 / 1920 = 2.0).
+    """
+
+    def _map_no_transform(self, gx, gy, displays, canvas_w, canvas_h, size):
+        """Replicate _spawn_circle's coordinate mapping without a transform.
+
+        Returns (obs_x, obs_y) using the virtual desktop fallback.
+        """
+        display = find_display_for_point(gx, gy, displays)
+        assert display is not None, "click should land on a display"
+
+        retina = display.get("retina_scale", 1.0)
+
+        # Virtual desktop fallback (matches the fix in _spawn_circle)
+        vd_left = min(d["x"] for d in displays)
+        vd_top = min(d["y"] for d in displays)
+        vd_right = max(d["x"] + d["w"] for d in displays)
+        vd_bottom = max(d["y"] + d["h"] for d in displays)
+        phys_x = (gx - vd_left) * retina
+        phys_y = (gy - vd_top) * retina
+        phys_mon_w = (vd_right - vd_left) * retina
+        phys_mon_h = (vd_bottom - vd_top) * retina
+
+        return map_coords(phys_x, phys_y, canvas_w, canvas_h,
+                          phys_mon_w, phys_mon_h, size)
+
+    def test_center_left_display_identical_pair(self):
+        """Click at center of left 1920x1080, canvas 3840x1080."""
+        obs_x, obs_y = self._map_no_transform(
+            960, 540, DUAL_IDENTICAL, 3840, 1080, 60)
+        # scale = 3840/3840 = 1.0, so obs_x = 960 - 30 = 930
+        assert obs_x == pytest.approx(930.0)
+        assert obs_y == pytest.approx(510.0)
+
+    def test_center_right_display_identical_pair(self):
+        """Click at center of right 1920x1080, canvas 3840x1080."""
+        obs_x, obs_y = self._map_no_transform(
+            1920 + 960, 540, DUAL_IDENTICAL, 3840, 1080, 60)
+        # global x=2880, scale=1.0, obs_x = 2880 - 30 = 2850
+        assert obs_x == pytest.approx(2850.0)
+        assert obs_y == pytest.approx(510.0)
+
+    def test_left_edge_of_right_display(self):
+        """Click at left edge of right display."""
+        obs_x, obs_y = self._map_no_transform(
+            1920, 0, DUAL_IDENTICAL, 3840, 1080, 60)
+        assert obs_x == pytest.approx(1920 - 30.0)
+        assert obs_y == pytest.approx(-30.0)
+
+    def test_non_matching_canvas_scales_proportionally(self):
+        """Canvas smaller than virtual desktop: scale < 1.0."""
+        obs_x, obs_y = self._map_no_transform(
+            960, 540, DUAL_IDENTICAL, 1920, 540, 60)
+        # vd = 3840x1080, canvas = 1920x540, scale = 0.5
+        # obs_x = 960 * 0.5 - 30 = 450
+        # obs_y = 540 * 0.5 - 30 = 240
+        assert obs_x == pytest.approx(450.0)
+        assert obs_y == pytest.approx(240.0)
+
+    def test_mixed_resolution_displays(self):
+        """Two different-sized displays, canvas equals virtual desktop."""
+        # DUAL_SIDE_BY_SIDE: 1920x1080 + 2560x1440
+        # vd = (0,0)-(4480,1440) = 4480x1440
+        obs_x, obs_y = self._map_no_transform(
+            960, 540, DUAL_SIDE_BY_SIDE, 4480, 1440, 60)
+        # scale = 4480/4480 = 1.0
+        assert obs_x == pytest.approx(930.0)
+        assert obs_y == pytest.approx(510.0)

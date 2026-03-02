@@ -238,6 +238,11 @@ _captured_display = None  # display dict for the monitor being captured (or None
 _display_capture_map = {}    # {display_id: {"display": dict, "source_name": str}}
 _multi_capture_mode = False  # True when "(all)" is selected
 
+# Label used in the editable combo for multi-capture mode.
+# OBS_COMBO_TYPE_EDITABLE stores the label text as the setting value,
+# NOT the programmatic value parameter, so we must match on this label.
+_ALL_CAPTURES_LABEL = "(all - auto detect)"
+
 # Settings with defaults
 _settings = {
     "left_image": "",
@@ -306,7 +311,7 @@ def script_properties():
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING,
     )
     obs.obs_property_list_add_string(capture_list, "(none)", "")
-    obs.obs_property_list_add_string(capture_list, "(all - auto detect)", "__all__")
+    obs.obs_property_list_add_string(capture_list, _ALL_CAPTURES_LABEL, _ALL_CAPTURES_LABEL)
     _populate_capture_list(capture_list)
     obs.obs_properties_add_button(
         props, "btn_refresh", "Refresh Displays", _on_refresh_displays,
@@ -449,7 +454,7 @@ def _on_refresh_displays(props, prop):
     if capture_list is not None:
         obs.obs_property_list_clear(capture_list)
         obs.obs_property_list_add_string(capture_list, "(none)", "")
-        obs.obs_property_list_add_string(capture_list, "(all - auto detect)", "__all__")
+        obs.obs_property_list_add_string(capture_list, _ALL_CAPTURES_LABEL, _ALL_CAPTURES_LABEL)
         _populate_capture_list(capture_list)
     n = len(_all_displays)
     if _multi_capture_mode:
@@ -782,8 +787,18 @@ def _resolve_all_capture_sources():
     _display_capture_map = {}
 
     try:
-        for name in _iter_display_capture_names():
+        source_names = list(_iter_display_capture_names())
+        obs.script_log(obs.LOG_INFO,
+                       f"Click Pop: _resolve_all found display capture sources: "
+                       f"{source_names}")
+        for name in source_names:
             display = _resolve_display_for_source(name)
+            obs.script_log(obs.LOG_INFO,
+                           f"Click Pop: _resolve_all source={name!r} -> "
+                           f"display={display['w']}x{display['h']}@"
+                           f"({display['x']},{display['y']}) id={display['id']}"
+                           if display else
+                           f"Click Pop: _resolve_all source={name!r} -> None")
             if display is not None:
                 _display_capture_map[display["id"]] = {
                     "display": display,
@@ -798,7 +813,7 @@ def _resolve_captured_display():
     """Determine which physical display the selected capture source records.
 
     In single-source mode, sets ``_captured_display`` to the matching
-    display dict.  In multi-capture mode (``__all__``), populates
+    display dict.  In multi-capture mode, populates
     ``_display_capture_map`` instead.
     """
     global _captured_display, _multi_capture_mode
@@ -809,7 +824,7 @@ def _resolve_captured_display():
     if not name:
         return
 
-    if name == "__all__":
+    if name == _ALL_CAPTURES_LABEL:
         _multi_capture_mode = True
         _resolve_all_capture_sources()
         return
@@ -826,7 +841,7 @@ def _get_capture_transform(scene, source_name=None):
     or ``None`` if no source name is configured or the source isn't found.
     """
     name = source_name or _settings.get("capture_source", "")
-    if not name or name == "__all__":
+    if not name or name == _ALL_CAPTURES_LABEL:
         return None
 
     item = obs.obs_scene_find_source_recursive(scene, name)
@@ -1004,6 +1019,21 @@ def _spawn_circle(x, y, is_left, expire_time):
     phys_y = local_y * retina
     phys_mon_w = mon_w * retina
     phys_mon_h = mon_h * retina
+
+    # When no capture source transform is available but we detected
+    # multiple displays, the display-local coords with single-monitor
+    # dimensions would produce wrong scaling (e.g. canvas_w / mon_w =
+    # 3840 / 1920 = 2.0).  Fall back to global coords mapped across the
+    # entire virtual desktop so the proportional mapping stays correct.
+    if transform is None and display is not None:
+        vd_left = min(d["x"] for d in _all_displays)
+        vd_top = min(d["y"] for d in _all_displays)
+        vd_right = max(d["x"] + d["w"] for d in _all_displays)
+        vd_bottom = max(d["y"] + d["h"] for d in _all_displays)
+        phys_x = (x - vd_left) * retina
+        phys_y = (y - vd_top) * retina
+        phys_mon_w = (vd_right - vd_left) * retina
+        phys_mon_h = (vd_bottom - vd_top) * retina
 
     obs_x, obs_y = map_coords(phys_x, phys_y, canvas_w, canvas_h,
                               phys_mon_w, phys_mon_h,
