@@ -420,3 +420,87 @@ class TestDpiScalingRegression:
         assert display is not captured
         # _spawn_circle would discard this click
         assert display is DUAL_DPI_PHYSICAL[1]
+
+
+# ---------------------------------------------------------------------------
+# Multi-capture routing tests (all - auto detect)
+# ---------------------------------------------------------------------------
+
+class TestMultiCaptureRouting:
+    """Test the routing logic used when multi-capture mode is active.
+
+    Replicates the _spawn_circle decision logic for the "__all__" mode:
+    - find_display_for_point to determine which display the click hit
+    - look up display["id"] in _display_capture_map
+    - return the source name if mapped, or discard if not
+    """
+
+    def _route_click(self, gx, gy, displays, display_capture_map):
+        """Replicate _spawn_circle multi-capture routing.
+
+        Returns the capture source name for the click, or None if discarded.
+        """
+        if len(displays) <= 1:
+            return None  # multi-display path skipped
+        display = find_display_for_point(gx, gy, displays)
+        if display is not None and display["id"] in display_capture_map:
+            return display_capture_map[display["id"]]["source_name"]
+        return None  # discarded
+
+    def test_click_on_primary_routes_to_primary_source(self):
+        cap_map = {
+            1: {"display": DUAL_SIDE_BY_SIDE[0], "source_name": "Display Capture 1"},
+            2: {"display": DUAL_SIDE_BY_SIDE[1], "source_name": "Display Capture 2"},
+        }
+        result = self._route_click(100, 200, DUAL_SIDE_BY_SIDE, cap_map)
+        assert result == "Display Capture 1"
+
+    def test_click_on_secondary_routes_to_secondary_source(self):
+        cap_map = {
+            1: {"display": DUAL_SIDE_BY_SIDE[0], "source_name": "Display Capture 1"},
+            2: {"display": DUAL_SIDE_BY_SIDE[1], "source_name": "Display Capture 2"},
+        }
+        result = self._route_click(2000, 500, DUAL_SIDE_BY_SIDE, cap_map)
+        assert result == "Display Capture 2"
+
+    def test_click_on_unmapped_display_discarded(self):
+        """Only primary is mapped; click on secondary should be discarded."""
+        cap_map = {
+            1: {"display": DUAL_SIDE_BY_SIDE[0], "source_name": "Display Capture 1"},
+        }
+        result = self._route_click(2000, 500, DUAL_SIDE_BY_SIDE, cap_map)
+        assert result is None
+
+    def test_click_in_dead_zone_discarded(self):
+        cap_map = {
+            1: {"display": TRIPLE_L_SHAPE[0], "source_name": "DC1"},
+            2: {"display": TRIPLE_L_SHAPE[1], "source_name": "DC2"},
+            3: {"display": TRIPLE_L_SHAPE[2], "source_name": "DC3"},
+        }
+        # (1920, 1200) is in the dead zone of the L-shaped layout
+        result = self._route_click(1920, 1200, TRIPLE_L_SHAPE, cap_map)
+        assert result is None
+
+    def test_triple_monitor_all_mapped(self):
+        cap_map = {
+            1: {"display": TRIPLE_L_SHAPE[0], "source_name": "DC1"},
+            2: {"display": TRIPLE_L_SHAPE[1], "source_name": "DC2"},
+            3: {"display": TRIPLE_L_SHAPE[2], "source_name": "DC3"},
+        }
+        assert self._route_click(500, 500, TRIPLE_L_SHAPE, cap_map) == "DC1"
+        assert self._route_click(2500, 500, TRIPLE_L_SHAPE, cap_map) == "DC2"
+        assert self._route_click(500, 1500, TRIPLE_L_SHAPE, cap_map) == "DC3"
+
+    def test_single_display_skips_multi_path(self):
+        """With only one display, multi-capture routing is not used."""
+        cap_map = {
+            1: {"display": SINGLE[0], "source_name": "Display Capture"},
+        }
+        # _route_click returns None because len(displays) <= 1
+        result = self._route_click(960, 540, SINGLE, cap_map)
+        assert result is None
+
+    def test_empty_capture_map_discards_all(self):
+        """When no sources are mapped, all clicks are discarded."""
+        result = self._route_click(100, 200, DUAL_SIDE_BY_SIDE, {})
+        assert result is None
