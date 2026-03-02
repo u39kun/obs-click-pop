@@ -235,6 +235,13 @@ _active_clicks = []       # list of (source_name, expire_time)
 _retina_scale = 1.0       # macOS Retina backing scale factor (2.0 on HiDPI)
 _all_displays = []        # list of display descriptors from _detect_all_displays()
 _captured_display = None  # display dict for the monitor being captured (or None)
+_display_capture_map = {}    # {display_id: {"display": dict, "source_name": str}}
+_multi_capture_mode = False  # True when "(all)" is selected
+
+# Label used in the editable combo for multi-capture mode.
+# OBS_COMBO_TYPE_EDITABLE stores the label text as the setting value,
+# NOT the programmatic value parameter, so we must match on this label.
+_ALL_CAPTURES_LABEL = "(all - auto detect)"
 
 # Settings with defaults
 _settings = {
@@ -304,6 +311,7 @@ def script_properties():
         obs.OBS_COMBO_TYPE_EDITABLE, obs.OBS_COMBO_FORMAT_STRING,
     )
     obs.obs_property_list_add_string(capture_list, "(none)", "")
+    obs.obs_property_list_add_string(capture_list, _ALL_CAPTURES_LABEL, _ALL_CAPTURES_LABEL)
     _populate_capture_list(capture_list)
     obs.obs_properties_add_button(
         props, "btn_refresh", "Refresh Displays", _on_refresh_displays,
@@ -341,7 +349,11 @@ def _add_display_info(props):
         label = f"  Display {i + 1}: {d['w']}x{d['h']} @ ({d['x']},{d['y']})"
         if retina != 1.0:
             label += f" [{retina:.0f}x Retina]"
-        if _captured_display is d:
+        if _multi_capture_mode:
+            info = _display_capture_map.get(d["id"])
+            if info is not None:
+                label += f" -> {info['source_name']}"
+        elif _captured_display is d:
             label += " [CAPTURED]"
         lines.append(label)
     obs.obs_properties_add_text(
@@ -415,7 +427,16 @@ def _refresh_displays():
                        f"@ ({d['x']},{d['y']}) retina={d.get('retina_scale',1.0)}"
                        f"{' dev=' + dev if dev else ''}"
                        f"{' path=' + path if path else ''}")
-    if _captured_display:
+    if _multi_capture_mode:
+        obs.script_log(obs.LOG_INFO,
+                       f"Click Pop: multi-capture mode — "
+                       f"{len(_display_capture_map)} display(s) mapped")
+        for did, info in _display_capture_map.items():
+            d = info["display"]
+            obs.script_log(obs.LOG_INFO,
+                           f"Click Pop:   display {did}: "
+                           f"{d['w']}x{d['h']} -> {info['source_name']}")
+    elif _captured_display:
         obs.script_log(obs.LOG_INFO,
                        f"Click Pop: captured display: "
                        f"{_captured_display['w']}x{_captured_display['h']} "
@@ -433,9 +454,15 @@ def _on_refresh_displays(props, prop):
     if capture_list is not None:
         obs.obs_property_list_clear(capture_list)
         obs.obs_property_list_add_string(capture_list, "(none)", "")
+        obs.obs_property_list_add_string(capture_list, _ALL_CAPTURES_LABEL, _ALL_CAPTURES_LABEL)
         _populate_capture_list(capture_list)
     n = len(_all_displays)
-    cap = "yes" if _captured_display else "no"
+    if _multi_capture_mode:
+        cap = f"all ({len(_display_capture_map)} mapped)"
+    elif _captured_display:
+        cap = "yes"
+    else:
+        cap = "no"
     obs.script_log(obs.LOG_INFO,
                    f"Click Pop: refreshed — {n} display(s), captured={cap}")
     return True
@@ -503,43 +530,45 @@ _DISPLAY_CAPTURE_PREFIXES = (
 )
 
 
-def _populate_capture_list(prop):
-    """Add current-scene Display Capture sources to a combo-box property.
+def _iter_display_capture_names():
+    """Yield names of Display Capture sources in the current scene.
 
     Uses ``obs_scene_save_transform_states`` to discover source names (avoids
     ``obs_scene_enum_items`` which has a broken SWIG wrapper in OBS ≤32.0.x).
     """
+    import json
+    scene_src = obs.obs_frontend_get_current_scene()
+    scene = obs.obs_scene_from_source(scene_src)
+    obs.obs_source_release(scene_src)
+    if scene is None:
+        return
+
+    data = obs.obs_scene_save_transform_states(scene, True)
+    json_str = obs.obs_data_get_json(data)
+    obs.obs_data_release(data)
+    if not json_str:
+        return
+
+    parsed = json.loads(json_str)
+    for scene_info in parsed.get("scenes_and_groups", []):
+        for item_info in scene_info.get("items", []):
+            item_id = item_info.get("id")
+            if item_id is None:
+                continue
+            item = obs.obs_scene_find_sceneitem_by_id(scene, item_id)
+            if item is None:
+                continue
+            source = obs.obs_sceneitem_get_source(item)
+            src_id = obs.obs_source_get_unversioned_id(source)
+            if src_id.startswith(_DISPLAY_CAPTURE_PREFIXES):
+                yield obs.obs_source_get_name(source)
+
+
+def _populate_capture_list(prop):
+    """Add current-scene Display Capture sources to a combo-box property."""
     try:
-        scene_src = obs.obs_frontend_get_current_scene()
-        scene = obs.obs_scene_from_source(scene_src)
-        obs.obs_source_release(scene_src)
-        if scene is None:
-            return
-
-        # Parse the transform-states JSON to get scene-item IDs, then look
-        # up each item by ID (avoids obs_scene_enum_items which has a broken
-        # SWIG wrapper in OBS ≤32.0.x).
-        import json
-        data = obs.obs_scene_save_transform_states(scene, True)
-        json_str = obs.obs_data_get_json(data)
-        obs.obs_data_release(data)
-        if not json_str:
-            return
-
-        parsed = json.loads(json_str)
-        for scene_info in parsed.get("scenes_and_groups", []):
-            for item_info in scene_info.get("items", []):
-                item_id = item_info.get("id")
-                if item_id is None:
-                    continue
-                item = obs.obs_scene_find_sceneitem_by_id(scene, item_id)
-                if item is None:
-                    continue
-                source = obs.obs_sceneitem_get_source(item)
-                src_id = obs.obs_source_get_unversioned_id(source)
-                if src_id.startswith(_DISPLAY_CAPTURE_PREFIXES):
-                    name = obs.obs_source_get_name(source)
-                    obs.obs_property_list_add_string(prop, name, name)
+        for name in _iter_display_capture_names():
+            obs.obs_property_list_add_string(prop, name, name)
     except Exception as exc:
         obs.script_log(obs.LOG_INFO,
                        f"Click Pop: capture list populate failed: {exc}")
@@ -642,25 +671,17 @@ def _display_uuid_via_ctypes(display_id):
     return result
 
 
-def _resolve_captured_display():
-    """Determine which physical display the selected capture source records.
+def _resolve_display_for_source(source_name):
+    """Resolve which physical display a named capture source records.
 
-    Reads platform-specific properties from the Display Capture source and
-    matches against ``_all_displays``.  Sets the module-level
-    ``_captured_display`` to the matching display dict, or leaves it as
-    ``None`` if no confident match is found (in which case no clicks are
-    discarded — better to show extra circles than miss all of them).
+    Returns the matching display dict from ``_all_displays``, or ``None``.
     """
-    global _captured_display
-    _captured_display = None
+    if not source_name or not _all_displays:
+        return None
 
-    name = _settings.get("capture_source", "")
-    if not name or not _all_displays:
-        return
-
-    source = obs.obs_get_source_by_name(name)
+    source = obs.obs_get_source_by_name(source_name)
     if source is None:
-        return
+        return None
 
     src_id = obs.obs_source_get_unversioned_id(source)
     settings = obs.obs_source_get_settings(source)
@@ -683,10 +704,9 @@ def _resolve_captured_display():
                         for d in _all_displays:
                             d_uuid = _display_uuid_via_ctypes(d["id"])
                             if d_uuid and d_uuid.strip("{}").upper() == norm_uuid:
-                                _captured_display = d
                                 obs.script_log(obs.LOG_INFO,
                                                f"Click Pop: matched display by UUID")
-                                return
+                                return d
                     except Exception as exc:
                         obs.script_log(obs.LOG_INFO,
                                        f"Click Pop: UUID matching failed: {exc}")
@@ -695,10 +715,9 @@ def _resolve_captured_display():
                 if display_val:
                     for d in _all_displays:
                         if int(d["id"]) == int(display_val):
-                            _captured_display = d
                             obs.script_log(obs.LOG_INFO,
                                            f"Click Pop: matched display by ID")
-                            return
+                            return d
 
                 # 3. Fall back to source output dimensions
                 src_w = obs.obs_source_get_width(source)
@@ -708,11 +727,10 @@ def _resolve_captured_display():
                         phys_w = int(d["w"] * d.get("retina_scale", 1.0))
                         phys_h = int(d["h"] * d.get("retina_scale", 1.0))
                         if phys_w == src_w and phys_h == src_h:
-                            _captured_display = d
                             obs.script_log(obs.LOG_INFO,
                                            f"Click Pop: matched display by "
                                            f"dimensions {src_w}x{src_h}")
-                            return
+                            return d
 
                 obs.script_log(obs.LOG_INFO,
                                "Click Pop: screen_capture display match failed")
@@ -720,8 +738,7 @@ def _resolve_captured_display():
                 # Legacy display_capture: "display" is a 0-based index
                 display_idx = obs.obs_data_get_int(settings, "display")
                 if 0 <= display_idx < len(_all_displays):
-                    _captured_display = _all_displays[display_idx]
-                    return
+                    return _all_displays[display_idx]
         elif sys.platform == "win32":
             # OBS 28+ stores monitor_id as a PnP device interface path
             # (e.g. \\?\DISPLAY#HW_ID#INSTANCE#{GUID}).
@@ -737,31 +754,85 @@ def _resolve_captured_display():
             if monitor_id:
                 for d in _all_displays:
                     if d.get("device_path") == monitor_id:
-                        _captured_display = d
                         obs.script_log(obs.LOG_INFO,
                                        f"Click Pop: matched display by "
                                        f"device path")
-                        return
+                        return d
 
             # 2. Fall back to monitor index (legacy OBS)
             if 0 <= monitor_idx < len(_all_displays):
-                _captured_display = _all_displays[monitor_idx]
-                return
+                return _all_displays[monitor_idx]
         else:
             # Linux xshm_input: "screen" is typically 0 for first X screen
             screen_idx = obs.obs_data_get_int(settings, "screen")
             if 0 <= screen_idx < len(_all_displays):
-                _captured_display = _all_displays[screen_idx]
-                return
+                return _all_displays[screen_idx]
     except Exception as exc:
         obs.script_log(obs.LOG_INFO,
-                       f"Click Pop: _resolve_captured_display error: {exc}")
+                       f"Click Pop: _resolve_display_for_source error: {exc}")
     finally:
         obs.obs_data_release(settings)
         obs.obs_source_release(source)
 
+    return None
 
-def _get_capture_transform(scene):
+
+def _resolve_all_capture_sources():
+    """Populate ``_display_capture_map`` for all Display Capture sources.
+
+    Enumerates Display Capture sources in the current scene and resolves
+    which physical display each captures.
+    """
+    global _display_capture_map
+    _display_capture_map = {}
+
+    try:
+        source_names = list(_iter_display_capture_names())
+        obs.script_log(obs.LOG_INFO,
+                       f"Click Pop: _resolve_all found display capture sources: "
+                       f"{source_names}")
+        for name in source_names:
+            display = _resolve_display_for_source(name)
+            obs.script_log(obs.LOG_INFO,
+                           f"Click Pop: _resolve_all source={name!r} -> "
+                           f"display={display['w']}x{display['h']}@"
+                           f"({display['x']},{display['y']}) id={display['id']}"
+                           if display else
+                           f"Click Pop: _resolve_all source={name!r} -> None")
+            if display is not None:
+                _display_capture_map[display["id"]] = {
+                    "display": display,
+                    "source_name": name,
+                }
+    except Exception as exc:
+        obs.script_log(obs.LOG_INFO,
+                       f"Click Pop: _resolve_all_capture_sources error: {exc}")
+
+
+def _resolve_captured_display():
+    """Determine which physical display the selected capture source records.
+
+    In single-source mode, sets ``_captured_display`` to the matching
+    display dict.  In multi-capture mode, populates
+    ``_display_capture_map`` instead.
+    """
+    global _captured_display, _multi_capture_mode
+    _captured_display = None
+    _multi_capture_mode = False
+
+    name = _settings.get("capture_source", "")
+    if not name:
+        return
+
+    if name == _ALL_CAPTURES_LABEL:
+        _multi_capture_mode = True
+        _resolve_all_capture_sources()
+        return
+
+    _captured_display = _resolve_display_for_source(name)
+
+
+def _get_capture_transform(scene, source_name=None):
     """Read crop / position / scale from the named Display Capture source.
 
     Checks both the scene-item crop (Edit Transform) and Crop/Pad filters.
@@ -769,8 +840,8 @@ def _get_capture_transform(scene):
     Returns ``(crop_left, crop_top, pos_x, pos_y, scale_x, scale_y)``
     or ``None`` if no source name is configured or the source isn't found.
     """
-    name = _settings.get("capture_source", "")
-    if not name:
+    name = source_name or _settings.get("capture_source", "")
+    if not name or name == _ALL_CAPTURES_LABEL:
         return None
 
     item = obs.obs_scene_find_source_recursive(scene, name)
@@ -883,14 +954,21 @@ def _spawn_circle(x, y, is_left, expire_time):
     # Single-display setups fall through to the legacy path so that the
     # user's manual monitor_w / monitor_h settings are always respected.
     display = None
+    capture_source_name = None  # used in multi-capture mode
     if len(_all_displays) > 1:
         display = find_display_for_point(x, y, _all_displays)
 
-        # If a specific display is being captured, discard clicks on other
-        # displays.  Only applies when we have multiple displays — single
-        # display should never discard.
-        if _captured_display is not None and display is not _captured_display:
-            return
+        if _multi_capture_mode:
+            if display is not None and display["id"] in _display_capture_map:
+                capture_source_name = _display_capture_map[display["id"]]["source_name"]
+            else:
+                return  # no capture source for this display
+        else:
+            # If a specific display is being captured, discard clicks on other
+            # displays.  Only applies when we have multiple displays — single
+            # display should never discard.
+            if _captured_display is not None and display is not _captured_display:
+                return
 
     # Use display-specific values when a multi-monitor hit was found,
     # otherwise fall back to settings (preserves single-display behavior).
@@ -923,7 +1001,7 @@ def _spawn_circle(x, y, is_left, expire_time):
     canvas_w = obs.obs_source_get_width(scene_src) or _settings["monitor_w"]
     canvas_h = obs.obs_source_get_height(scene_src) or _settings["monitor_h"]
     scene = obs.obs_scene_from_source(scene_src)
-    transform = _get_capture_transform(scene) if scene else None
+    transform = _get_capture_transform(scene, capture_source_name) if scene else None
     obs.obs_source_release(scene_src)
 
     kwargs = {}
@@ -941,6 +1019,21 @@ def _spawn_circle(x, y, is_left, expire_time):
     phys_y = local_y * retina
     phys_mon_w = mon_w * retina
     phys_mon_h = mon_h * retina
+
+    # When no capture source transform is available but we detected
+    # multiple displays, the display-local coords with single-monitor
+    # dimensions would produce wrong scaling (e.g. canvas_w / mon_w =
+    # 3840 / 1920 = 2.0).  Fall back to global coords mapped across the
+    # entire virtual desktop so the proportional mapping stays correct.
+    if transform is None and display is not None:
+        vd_left = min(d["x"] for d in _all_displays)
+        vd_top = min(d["y"] for d in _all_displays)
+        vd_right = max(d["x"] + d["w"] for d in _all_displays)
+        vd_bottom = max(d["y"] + d["h"] for d in _all_displays)
+        phys_x = (x - vd_left) * retina
+        phys_y = (y - vd_top) * retina
+        phys_mon_w = (vd_right - vd_left) * retina
+        phys_mon_h = (vd_bottom - vd_top) * retina
 
     obs_x, obs_y = map_coords(phys_x, phys_y, canvas_w, canvas_h,
                               phys_mon_w, phys_mon_h,
